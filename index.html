@@ -36,6 +36,7 @@ input[type=text]{border:1px solid var(--line);border-radius:9px;padding:10px;fon
 <body>
 <header><div class="wrap"><h1>🏆 대진표 메이커</h1><p>참가 팀을 입력하고 대진표를 만든 뒤, 경기 결과를 선택해 우승팀까지 진행하세요.</p></div></header>
 <main>
+<div class="panel" style="padding:10px 16px"><strong>공유 상태:</strong> <span id="syncStatus">Firebase 연결 중...</span><p class="hint" style="margin:4px 0 0">같은 사이트에 접속한 사람은 동일한 대진표를 함께 볼 수 있습니다.</p></div>
 <section class="panel setup">
  <div class="grid">
   <div><h2>① 대회 정보</h2><input id="eventName" type="text" placeholder="대회 이름 (예: 학년별 농구 대회)" style="width:100%"><p class="hint">참가 팀은 한 줄에 하나씩 입력하세요. 최소 2팀이 필요합니다.</p></div>
@@ -55,7 +56,28 @@ input[type=text]{border:1px solid var(--line);border-radius:9px;padding:10px;fon
  <div class="bracket-scroll"><div id="bracket"><p class="hint">위에서 참가 팀을 입력하고 ‘대진표 만들기’를 눌러주세요.</p></div></div>
 </section>
 </main>
-<script>
+<script type="module">
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCpQGuHGF_pn8mXjJChFUE7G852iDFKl2g",
+  authDomain: "shared-bracket.firebaseapp.com",
+  databaseURL: "https://shared-bracket-default-rtdb.firebaseio.com",
+  projectId: "shared-bracket",
+  storageBucket: "shared-bracket.firebasestorage.app",
+  messagingSenderId: "675645791820",
+  appId: "1:675645791820:web:1323eac770c2421aa79ee9",
+  measurementId: "G-FDRYE4J0ZC"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const database = getDatabase(firebaseApp);
+const auth = getAuth(firebaseApp);
+const sharedRef = ref(database, "sharedBracket");
+let applyingRemote = false;
+let saveTimer = null;
 let rounds=[];
 let thirdPlace=[null,null], thirdWinner=null;
 const $=id=>document.getElementById(id);
@@ -142,7 +164,7 @@ function render(){
    const seed=document.createElement('span');seed.className='seed';seed.textContent=team?'':'—';row.appendChild(seed);
    const label=document.createElement('span');label.style.flex='1';label.className=team?'':'empty';label.textContent=team||'준결승 결과 대기';row.appendChild(label);
    if(team && thirdPlace[0] && thirdPlace[1]){
-    const b=document.createElement('button');b.textContent='3위';b.onclick=()=>{thirdWinner=s;render()};row.appendChild(b);
+    const b=document.createElement('button');b.textContent='3위';b.onclick=()=>{thirdWinner=s;render();scheduleSharedSave()};row.appendChild(b);
    }
    box.appendChild(row);
   });
@@ -154,5 +176,92 @@ $('makeBtn').onclick=makeBracket;
 $('shuffleBtn').onclick=()=>{$('teams').value=shuffle($('teams').value.split(/\n/).map(x=>x.trim()).filter(Boolean)).join('\n')};
 $('sampleBtn').onclick=()=>{$('teams').value='1반\n2반\n3반\n4반\n5반\n6반\n7반\n8반'};
 $('resetBtn').onclick=()=>{if(confirm('대진표를 초기화할까요?')){rounds=[];thirdPlace=[null,null];thirdWinner=null;$('bracket').innerHTML='<p class="hint">위에서 참가 팀을 입력하고 ‘대진표 만들기’를 눌러주세요.</p>';$('status').textContent='대진표가 초기화되었습니다.'}};
+
+function setSyncStatus(message, isError=false) {
+  const el = document.getElementById('syncStatus');
+  if (el) { el.textContent = message; el.style.color = isError ? '#b42318' : '#16803c'; }
+}
+function snapshotState() {
+  return {
+    eventName: $('eventName').value,
+    teamsText: $('teams').value,
+    rounds: rounds.map(round => ({matches: round.matches.map(pair => {
+      const p = [pair[0] ?? null, pair[1] ?? null];
+      if (pair._winner !== undefined) p._winner = pair._winner;
+      return p;
+    })})),
+    thirdPlace: [...thirdPlace],
+    thirdWinner
+  };
+}
+function scheduleSharedSave() {
+  if (applyingRemote || !auth.currentUser) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      await set(sharedRef, snapshotState());
+      setSyncStatus('연결됨 · 변경 사항 공유 완료');
+    } catch (e) {
+      setSyncStatus('저장 실패: ' + e.message, true);
+    }
+  }, 250);
+}
+function restoreState(data) {
+  if (!data) return;
+  applyingRemote = true;
+  $('eventName').value = data.eventName || '';
+  $('teams').value = data.teamsText || '';
+  rounds = Array.isArray(data.rounds) ? data.rounds.map(round => ({
+    matches: (round.matches || []).map(pair => {
+      const p = [pair[0] ?? null, pair[1] ?? null];
+      if (pair._winner !== undefined) p._winner = pair._winner;
+      return p;
+    })
+  })) : [];
+  thirdPlace = Array.isArray(data.thirdPlace) ? [...data.thirdPlace] : [null, null];
+  thirdWinner = data.thirdWinner ?? null;
+  if (rounds.length) render();
+  else {
+    $('bracket').innerHTML = '<p class="hint">위에서 참가 팀을 입력하고 ‘대진표 만들기’를 눌러주세요.</p>';
+    $('status').textContent = '아직 대진표가 없습니다.';
+    $('eventTitle').textContent = $('eventName').value || '토너먼트';
+  }
+  applyingRemote = false;
+}
+async function startSharedBracket() {
+  try {
+    await signInAnonymously(auth);
+    setSyncStatus('연결됨 · 다른 참가자의 변경을 기다리는 중');
+    onValue(sharedRef, snap => {
+      restoreState(snap.val());
+      setSyncStatus('실시간 공유 연결됨');
+    }, err => setSyncStatus('읽기 오류: ' + err.message, true));
+  } catch (e) {
+    setSyncStatus('연결 실패: ' + e.message + ' (익명 로그인과 DB 규칙을 확인하세요)', true);
+  }
+}
+
+// 사용자 조작 후 공유 데이터 저장
+const originalMakeBracket = makeBracket;
+makeBracket = function(){ originalMakeBracket(); scheduleSharedSave(); };
+const originalChooseWinner = chooseWinner;
+chooseWinner = function(r,m,s){ originalChooseWinner(r,m,s); scheduleSharedSave(); };
+$('shuffleBtn').addEventListener('click', scheduleSharedSave);
+$('sampleBtn').addEventListener('click', scheduleSharedSave);
+$('resetBtn').addEventListener('click', scheduleSharedSave);
+$('eventName').addEventListener('input', scheduleSharedSave);
+$('teams').addEventListener('input', scheduleSharedSave);
+
+// 3·4위전 결과 선택도 공유
+const originalRender = render;
+render = function() {
+  originalRender();
+  document.querySelectorAll('#bracket .round:last-child .match button').forEach(btn => {
+    if (btn.textContent === '3위') {
+      btn.addEventListener('click', () => scheduleSharedSave());
+    }
+  });
+};
+startSharedBracket();
 </script>
 </body></html>
